@@ -6,6 +6,32 @@ DeepSeek-V4-Flash is a **284B-total / 13B-active MoE** model (released open-sour
 
 ---
 
+## 0. Executive summary — running Claude Code on DeepSeek V4
+
+Three things have to line up: **(1) where the model runs, (2) what speaks the Anthropic Messages API, and (3) whether caching survives.** They are independent — the API layer working tells you nothing about caching or architecture support.
+
+### Decision matrix
+
+| Backend | Anthropic endpoint via | Tool calling | Caching outcome | Verdict |
+|---|---|---|---|---|
+| **DeepSeek cloud** (`api.deepseek.com/anthropic`) | native (first-party) | yes | **automatic disk cache, ~98% off** | ✅ Best for cheap agent loops; zero ops |
+| **Self-host vLLM/SGLang** | vLLM native `/v1/messages`, or LiteLLM | yes (parser flags) | prefix caching = **speed only, no $** | ✅ Full control; needs 2×H200-class GPUs |
+| **Self-host llama.cpp** | native `/v1/messages` | yes | prefix caching, **actively defended** vs Claude Code cache-buster | ⚠️ Needs a V4 GGUF + CSA/HCA arch support (verify) |
+| **Azure Foundry DeepSeek V4** | none for DeepSeek — needs a proxy | **No (Preview)** | cache_control stripped; V4 prefix caching unconfirmed; no LiteLLM price entry | ❌ Weakest path today |
+
+### Proxy / tooling cheat-sheet
+
+| Layer | When you need it | Caching note |
+|---|---|---|
+| **none** (env vars only) | backend already exposes native Anthropic (`api.deepseek.com/anthropic`, vLLM, llama.cpp) | best case |
+| **Switcher** (`ccs`, deepclaude…) | flip Claude Code between native-Anthropic backends | passthrough; no transform |
+| **LiteLLM** | OpenAI-only backend, multi-model routing, auth, cost tracking | **strips `cache_control` for non-Claude** |
+| **claude-code-router** | per-task routing (background/think/longContext/webSearch) + transformers | **keeps `cache_control`** unless provider strips; ⚠️ v2.0.0 clamps `max_tokens` to 8192 |
+
+See §13 for the lessons behind this table.
+
+---
+
 ## 1. What the model actually is (sizing reality check)
 
 | | V4-Flash | V4-Pro (for contrast) |
@@ -375,6 +401,36 @@ So vs LiteLLM (which gates on `is_anthropic_claude_model` and strips for all non
 | Point Claude Code at a native Anthropic endpoint | a **switcher** (`ccs`, etc.) |
 | Switch Anthropic↔DeepSeek mid-session | **deepclaude** |
 | Per-task routing (Flash background / Pro think / long-context) + transformation | **claude-code-router** |
+
+---
+
+## 13. Lessons learned
+
+Distilled from §1–§12 — what actually matters if you want Claude Code on DeepSeek V4, whether self/local-hosted or on Azure, with or without a proxy in between.
+
+1. **Three layers are independent — don't conflate them.** *Where the model runs* (GPUs/quant), *what speaks the Anthropic API* (native vs proxy), and *whether caching pays off* are separate questions. A working `/v1/messages` endpoint says nothing about architecture support or caching. Most confusion comes from assuming "the endpoint works" means "it's cheap and correct."
+
+2. **"Anthropic-compatible" is the easy part; the model architecture is the hard part.** Every layer (vLLM, llama.cpp, LiteLLM, CCR, DeepSeek cloud) can translate the Messages API. The real gate for V4 is whether your engine supports its CSA+HCA attention and whether a usable quant exists — verify that first, not the API.
+
+3. **Two caching mechanisms, never confused again:** Anthropic's explicit `cache_control` breakpoints vs DeepSeek-style automatic prefix/disk caching. On DeepSeek, `cache_control` is **always a no-op** (server-side ignored); automatic caching does all the work. So whether a proxy forwards or strips `cache_control` is mostly irrelevant to DeepSeek — but it tells you a lot about the proxy's design.
+
+4. **Caching savings are a property of DeepSeek's *own cloud*, not of DeepSeek the model.** Self-hosting converts the benefit from **dollars to latency** (you already own the GPUs). Azure converts it to **nothing reliable** (no confirmed V4 prefix caching, no cost-tracking entry). If "95× cheaper agent loops" is the goal, only `api.deepseek.com` delivers it as advertised.
+
+5. **Azure Foundry is the trap.** It looks like the enterprise-grade option but is the weakest for this use case: no native Anthropic surface for DeepSeek (Claude gets one, DeepSeek doesn't), **tool calling = No in Preview** (a hard blocker for Claude Code agents), and caching that doesn't transfer. Use Azure for Claude-on-Azure, not DeepSeek-for-Claude-Code.
+
+6. **Proxies have opinions about `cache_control` — read the source.** LiteLLM **strips** it for any non-Claude model (`is_anthropic_claude_model` gate) and Fireworks strips it again; claude-code-router **preserves** it unless a provider transformer deletes it. Neither is "wrong," but you can't know without reading the code — which is why source-level verification beat docs every time here.
+
+7. **llama.cpp is the quiet standout for local + Claude Code.** It's the only layer that *defends* its prefix cache against Claude Code's per-request `cch` cache-buster stamp (PR #21793). If you self-host and care about cache hit-rate under Claude Code specifically, that engineering matters.
+
+8. **Match the tool to the actual need — don't over-build.** Native endpoint + env vars is enough for one backend. Reach for a **switcher** to flip between native-Anthropic backends, **LiteLLM** for OpenAI-only backends / cost tracking / auth, and **claude-code-router** only when you genuinely want per-task routing (cheap model for background, reasoning model for think). Every proxy adds a translation surface that can silently drop fields (tools, `cache_control`, `max_tokens`).
+
+9. **Watch for stale hardcoded limits in proxies.** CCR v2.0.0 clamps `max_tokens` to 8192 (a V3-era constant) — it predates V4 and would truncate output. Pin proxy versions and re-verify against the model you're actually running.
+
+10. **Practical recommendation:**
+    - *Cheapest, least ops:* DeepSeek cloud `api.deepseek.com/anthropic` + a switcher.
+    - *Full control / privacy:* self-host on vLLM (native `/v1/messages`) or llama.cpp (best cache behavior), FP4+FP8 weights, 2×H200-class.
+    - *Fancy routing:* claude-code-router in front of either — after confirming its V4 handling.
+    - *Azure:* only if you're committed to Foundry governance and can tolerate a proxy + no caching + waiting for tool-calling GA.
 
 ---
 
