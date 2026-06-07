@@ -63,6 +63,16 @@ The official instruct checkpoint is **not uniform precision**. Solving for the m
 
 For ~175 GB you also need to budget the **KV cache** — full 1M context adds ~10 GB; capping `--max-model-len` to 128K is the usual starting point.
 
+### DGX Spark / GB10 (and why an external GPU won't speed it up)
+
+The DGX Spark (GB10 Grace-Blackwell, 128 GB unified LPDDR5x, ~96–119 GB usable) is a popular local-dev box, but it's the **wrong tool for V4-Flash speed** — and bolting on an external GPU doesn't fix it.
+
+- **It doesn't fit on one Spark.** ~158 GB FP4 weights > 128 GB. The known working setup is a **two-node Spark cluster** (TP over ConnectX-7 200 Gb/s, vLLM) → only ~**20 tok/s**, ~0.28 req/s. Functional, slow.
+- **The bottleneck is memory bandwidth, not compute.** GB10 LPDDR5x ≈ **273 GB/s**; an H200 is ≈ **4.8 TB/s** (~18×). Decode is bandwidth-bound, so the Spark is inherently slow at it despite ~1 PFLOP FP4 compute.
+- **External GPU = interconnect wall.** The Spark has **no PCIe x16 slot**; expansion is 2× ConnectX-7 QSFP + USB-C. An eGPU runs over USB4/OCuLink at ~5–8 GB/s — *~35–50× slower than the Spark's own memory*. Sharding a 158 GB model across the Spark and an eGPU makes that link the new bottleneck, so it ends up **slower than the Spark alone**. Even ConnectX-7 (~25 GB/s) is ~11× slower than local memory. The only sane "Spark + fast GPU" pattern is disaggregated prefill on a Blackwell dGPU, which needs the model resident on the fast side too — so it doesn't help V4-Flash.
+
+**Actual speed levers on Spark** (in order of impact): **MTP speculative decoding** (45–85% draft acceptance vs 13–20% post-hoc), **GB10-optimized llama.cpp / FlashInfer autotune** ([croll83/llama.cpp-dgx](https://github.com/croll83/llama.cpp-dgx), [antirez/ds4](https://github.com/antirez/ds4)), and **2-node ConnectX clustering** (modest). For genuinely fast V4-Flash, use the HBM configs above — the Spark is for dev, not throughput.
+
 ---
 
 ## 3. Architecture: the two layers
@@ -473,6 +483,7 @@ The source-level findings in §10–§12 were verified against these exact commi
 - [DeepSeek-V4-Flash on Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
 - [DeepSeek-V4-Flash specs & VRAM (APXML)](https://apxml.com/models/deepseek-v4-flash)
 - [HF discussion: "Is 158B or 284b params?"](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/discussions/17) — the FP4+FP8 weight-size confusion
+- [Two-node DGX Spark DeepSeek-V4-Flash cluster (Tobias Weiss)](https://www.tobias-weiss.org/articles/ai/2-node-dgx-spark-deepseek-v4-cluster/) · [DGX Spark hardware (NVIDIA)](https://docs.nvidia.com/dgx/dgx-spark/hardware.html) · [croll83/llama.cpp-dgx](https://github.com/croll83/llama.cpp-dgx) · [antirez/ds4](https://github.com/antirez/ds4)
 - [Self-Hosting DeepSeek V4: vLLM, Hardware & Deployment (Lushbinary)](https://lushbinary.com/blog/deepseek-v4-self-hosting-guide-vllm-hardware-deployment/)
 - [Run DeepSeek V4 Flash Locally — 2026 setup (Codersera)](https://codersera.com/blog/run-deepseek-v4-flash-locally-full-2026-setup-guide/)
 - [DeepSeek-V4 on Day 0 with SGLang (LMSYS)](https://www.lmsys.org/blog/2026-04-25-deepseek-v4/) · [SGLang Cookbook: DeepSeek-V4](https://docs.sglang.io/cookbook/autoregressive/DeepSeek/DeepSeek-V4)
