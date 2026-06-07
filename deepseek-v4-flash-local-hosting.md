@@ -222,7 +222,7 @@ deepclaude's note describes the **Claude Code → DeepSeek cloud** path: Claude 
 
 ## 10. LiteLLM source-level verification (Anthropic→OpenAI proxy + caching)
 
-Verified against the LiteLLM source at commit `1cff02f` (2026-06-06). Conclusions are grounded in the actual code, not docs.
+Verified against the LiteLLM source at commit `1cff02f` (2026-06-06; full SHA + file list in [Appendix A](#appendix-a--exact-code-versions-reviewed)). Conclusions are grounded in the actual code, not docs.
 
 ### LiteLLM does expose an Anthropic endpoint and transform it to OpenAI
 
@@ -280,7 +280,7 @@ Additionally `AzureAIStudioConfig(OpenAIConfig)` has an auto-drop-on-422 retry t
 
 ## 11. llama.cpp's native Anthropic compatibility layer
 
-Verified against the llama.cpp source at commit `98d5e8b` (2026-06-06). llama.cpp's `llama-server` ships a **genuine, fairly complete Anthropic Messages API** — full request + response + streaming translation, not a thin shim.
+Verified against the llama.cpp source at commit `98d5e8b` (2026-06-06; full SHA + file list in [Appendix A](#appendix-a--exact-code-versions-reviewed)). llama.cpp's `llama-server` ships a **genuine, fairly complete Anthropic Messages API** — full request + response + streaming translation, not a thin shim.
 
 ### What's there
 
@@ -348,7 +348,7 @@ A switcher is enough when the target already exposes a native Anthropic endpoint
 
 ### Router — `musistudio/claude-code-router` (CCR)
 
-[github.com/musistudio/claude-code-router](https://github.com/musistudio/claude-code-router) — a proxy that **routes each request to a different backend by task**, with its own per-provider transformers. Verified against source at commit `e270dea` (v2.0.0, 2026-03-04).
+[github.com/musistudio/claude-code-router](https://github.com/musistudio/claude-code-router) — a proxy that **routes each request to a different backend by task**, with its own per-provider transformers. Verified against source at commit `e270dea` (v2.0.0, 2026-03-04; full SHA + file list in [Appendix A](#appendix-a--exact-code-versions-reviewed)).
 
 **Routing scenarios** (`packages/core/src/utils/router.ts`), in priority order:
 - per-project/session `Router` override from `config.json`
@@ -407,6 +407,26 @@ Distilled from §1–§12 — what actually matters if you want Claude Code on D
     - *Full control / privacy:* self-host on vLLM (native `/v1/messages`) or llama.cpp (best cache behavior), FP4+FP8 weights, 2×H200-class.
     - *Fancy routing:* claude-code-router in front of either — after confirming its V4 handling.
     - *Azure:* only if you're committed to Foundry governance and can tolerate a proxy + no caching + waiting for tool-calling GA.
+
+---
+
+## Appendix A — Exact code versions reviewed
+
+The source-level findings in §10–§12 were verified against these exact commits (cloned and inspected, not read from docs). Pinned so the claims are reproducible; later commits may differ.
+
+| Repo | Commit (full SHA) | Date | Tag/version | Head commit subject |
+|---|---|---|---|---|
+| [BerriAI/litellm](https://github.com/BerriAI/litellm) | [`1cff02f50ebefbc43ab6c13542f27fc662fe7e38`](https://github.com/BerriAI/litellm/commit/1cff02f50ebefbc43ab6c13542f27fc662fe7e38) | 2026-06-06 | — | refactor: convert AWS and GCP Terraform stacks into reusable modules (#28103) |
+| [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) | [`98d5e8ba8a2642710c9871d05ac1033a3328b884`](https://github.com/ggml-org/llama.cpp/commit/98d5e8ba8a2642710c9871d05ac1033a3328b884) | 2026-06-06 | — | common/chat : fix LFM2/LFM2.5 reasoning round-trip and `<think>` leak (#24234) |
+| [musistudio/claude-code-router](https://github.com/musistudio/claude-code-router) | [`e270dea523b8ac025ab9b7b0708dc170efa52d8a`](https://github.com/musistudio/claude-code-router/commit/e270dea523b8ac025ab9b7b0708dc170efa52d8a) | 2026-03-04 | v2.0.0 | update banner |
+
+**Files inspected per repo:**
+
+- **LiteLLM** (§10): `litellm/proxy/anthropic_endpoints/endpoints.py`, `litellm/llms/anthropic/experimental_pass_through/messages/handler.py`, `litellm/llms/anthropic/experimental_pass_through/adapters/transformation.py`, `litellm/llms/fireworks_ai/chat/transformation.py`, `litellm/llms/azure_ai/chat/transformation.py`, `model_prices_and_context_window.json`
+- **llama.cpp** (§11): `tools/server/server.cpp`, `tools/server/server-chat.cpp`, `tools/server/server-task.cpp`, `tools/server/server-http.cpp`, `tools/server/server-context.h`, `tools/server/tests/unit/test_compat_anthropic.py`
+- **claude-code-router** (§12): `packages/core/src/utils/router.ts`, `packages/core/src/transformer/anthropic.transformer.ts`, `.../deepseek.transformer.ts`, `.../groq.transformer.ts`, `.../vercel.transformer.ts`, `.../openai.responses.transformer.ts`
+
+> Doc-derived facts (§1–§9: model specs, DeepSeek/Azure API behavior, pricing) are not version-pinned and reflect the state on **2026-06-06/07**; re-verify against current docs.
 
 ---
 
