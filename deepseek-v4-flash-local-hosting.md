@@ -4,31 +4,7 @@
 
 DeepSeek-V4-Flash is a **284B-total / 13B-active MoE** model (released open-source, MIT, April 24 2026) that needs **~170–175 GB of VRAM** in its native FP4+FP8 format. You host it with **vLLM or SGLang**, then expose an **Anthropic Messages API** (`/v1/messages`) on top — either via **vLLM's built-in Anthropic endpoint** (simplest) or a **translation proxy** (LiteLLM / claude-code-proxy). The thing the "DeepSeek lab" does is exactly this: their `https://api.deepseek.com/anthropic` URL maps `claude-opus-*` → `deepseek-v4-pro` and `claude-sonnet/haiku-*` → `deepseek-v4-flash`. You replicate that mapping locally.
 
----
-
-## 0. Executive summary — running Claude Code on DeepSeek V4
-
-Three things have to line up: **(1) where the model runs, (2) what speaks the Anthropic Messages API, and (3) whether caching survives.** They are independent — the API layer working tells you nothing about caching or architecture support.
-
-### Decision matrix
-
-| Backend | Anthropic endpoint via | Tool calling | Caching outcome | Verdict |
-|---|---|---|---|---|
-| **DeepSeek cloud** (`api.deepseek.com/anthropic`) | native (first-party) | yes | **automatic disk cache, ~98% off** | ✅ Best for cheap agent loops; zero ops |
-| **Self-host vLLM/SGLang** | vLLM native `/v1/messages`, or LiteLLM | yes (parser flags) | prefix caching = **speed only, no $** | ✅ Full control; needs 2×H200-class GPUs |
-| **Self-host llama.cpp** | native `/v1/messages` | yes | prefix caching, **actively defended** vs Claude Code cache-buster | ⚠️ Needs a V4 GGUF + CSA/HCA arch support (verify) |
-| **Azure Foundry DeepSeek V4** | none for DeepSeek — needs a proxy | **No (Preview)** | cache_control stripped; V4 prefix caching unconfirmed; no LiteLLM price entry | ❌ Weakest path today |
-
-### Proxy / tooling cheat-sheet
-
-| Layer | When you need it | Caching note |
-|---|---|---|
-| **none** (env vars only) | backend already exposes native Anthropic (`api.deepseek.com/anthropic`, vLLM, llama.cpp) | best case |
-| **Switcher** (`ccs`, deepclaude…) | flip Claude Code between native-Anthropic backends | passthrough; no transform |
-| **LiteLLM** | OpenAI-only backend, multi-model routing, auth, cost tracking | **strips `cache_control` for non-Claude** |
-| **claude-code-router** | per-task routing (background/think/longContext/webSearch) + transformers | **keeps `cache_control`** unless provider strips; ⚠️ v2.0.0 clamps `max_tokens` to 8192 |
-
-See §13 for the lessons behind this table.
+> **Executive summary, decision matrix, and proxy cheat-sheet** have moved to the [README](./README.md). The lessons behind them are in [§13](#13-lessons-learned).
 
 ---
 
