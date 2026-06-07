@@ -329,6 +329,55 @@ Claude Code injects `x-anthropic-billing-header: ...; cch=<random>;` into the sy
 
 ---
 
+## 12. Routers & switchers for Claude Code (and how CCR handles caching)
+
+Two genres of community tooling sit between Claude Code and alternative backends:
+
+### Switchers (lightweight env-var flippers)
+
+They don't transform anything — they flip `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` to point Claude Code at a provider's **own** Anthropic-compatible endpoint:
+
+- **[maxgfr/claude-code-switch](https://github.com/maxgfr/claude-code-switch)** (`ccs`) — zero-dependency sidecar; Anthropic, OpenRouter, DeepSeek, Z.AI, Kimi, Qwen, MiniMax, or custom endpoints.
+- **[lucas-stellet/switcher](https://github.com/lucas-stellet/switcher)** — launches Claude Code with different providers.
+- **[foreveryh/claude-code-switch](https://github.com/foreveryh/claude-code-switch)** (`ccm`) — Bash CLI exporting Anthropic-compatible env vars.
+- **[aattaran/deepclaude](https://github.com/aattaran/deepclaude)** — switches Anthropic↔DeepSeek mid-session via a slash command (proxy on `localhost:3200`).
+
+A switcher is enough when the target already exposes a native Anthropic endpoint (e.g. `api.deepseek.com/anthropic`).
+
+### Router — `musistudio/claude-code-router` (CCR)
+
+[github.com/musistudio/claude-code-router](https://github.com/musistudio/claude-code-router) — a proxy that **routes each request to a different backend by task**, with its own per-provider transformers. Verified against source at commit `e270dea` (v2.0.0, 2026-03-04).
+
+**Routing scenarios** (`packages/core/src/utils/router.ts`), in priority order:
+- per-project/session `Router` override from `config.json`
+- `longContext` — when token count > `longContextThreshold` (default 60000) or last-usage input tokens exceed it
+- `<CCR-SUBAGENT-MODEL>...</CCR-SUBAGENT-MODEL>` tag in the system prompt → explicit subagent model
+- `background` — any `claude`+`haiku` model → cheap background model
+- `webSearch` — when a `web_search` tool is present (higher priority than thinking)
+- `think` — when `thinking` is set
+- else `default`
+
+**Anthropic endpoint:** `AnthropicTransformer` registers `endPoint = "/v1/messages"` and handles `x-api-key`/Bearer auth — so Claude Code points straight at CCR.
+
+**Caching — CCR differs from LiteLLM (important):**
+- The inbound `AnthropicTransformer` **preserves `cache_control`** — it carries it through on system text blocks (`anthropic.transformer.ts:64`) and tool messages (`:99`). CCR is permissive by default.
+- Provider transformers **strip it only where the backend rejects it**: `groq.transformer.ts` and `vercel.transformer.ts` `delete` it; `openai.responses.transformer.ts` deletes it.
+- **`deepseek.transformer.ts` does NOT touch `cache_control`** — it only clamps `max_tokens` to 8192 and reshapes `reasoning_content`↔`thinking` streaming. So routing to DeepSeek **forwards** `cache_control` (DeepSeek ignores it server-side and does its own automatic caching anyway — net effect identical to §9).
+
+So vs LiteLLM (which gates on `is_anthropic_claude_model` and strips for all non-Claude): **CCR keeps `cache_control` unless a provider explicitly removes it**, and DeepSeek keeps it. Either way the practical caching outcome on DeepSeek is the same — automatic prefix/disk caching does the work; explicit `cache_control` is a server-side no-op.
+
+> ⚠️ The pinned v2.0.0 `deepseek.transformer.ts` hardcodes a **`max_tokens` clamp to 8192** (a V3-era limit). For V4 (384K output) this would truncate — check for a newer release before using CCR with V4.
+
+### Which to use
+
+| Need | Tool |
+|---|---|
+| Point Claude Code at a native Anthropic endpoint | a **switcher** (`ccs`, etc.) |
+| Switch Anthropic↔DeepSeek mid-session | **deepclaude** |
+| Per-task routing (Flash background / Pro think / long-context) + transformation | **claude-code-router** |
+
+---
+
 ## Sources
 
 - [DeepSeek-V4-Flash on Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
@@ -351,3 +400,5 @@ Claude Code injects `x-anthropic-billing-header: ...; cch=<random>;` into the sy
 - [Prompt caching with Azure OpenAI (scope = OpenAI models only)](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/prompt-caching)
 - [LiteLLM source (BerriAI/litellm)](https://github.com/BerriAI/litellm) — verified at commit `1cff02f` (2026-06-06): `litellm/proxy/anthropic_endpoints/endpoints.py`, `litellm/llms/anthropic/experimental_pass_through/messages/handler.py`, `.../adapters/transformation.py`, `litellm/llms/fireworks_ai/chat/transformation.py`, `litellm/llms/azure_ai/chat/transformation.py`, `model_prices_and_context_window.json`
 - [llama.cpp source (ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp) — verified at commit `98d5e8b` (2026-06-06): `tools/server/server.cpp`, `server-chat.cpp`, `server-task.cpp`, `server-http.cpp`, `tests/unit/test_compat_anthropic.py` · [PR #21793 (prefix-cache cch normalization)](https://github.com/ggml-org/llama.cpp/pull/21793)
+- [claude-code-router (musistudio/claude-code-router)](https://github.com/musistudio/claude-code-router) — verified at commit `e270dea` (v2.0.0, 2026-03-04): `packages/core/src/utils/router.ts`, `packages/core/src/transformer/{anthropic,deepseek,groq,vercel,openai.responses}.transformer.ts`
+- Switchers: [maxgfr/claude-code-switch](https://github.com/maxgfr/claude-code-switch) · [lucas-stellet/switcher](https://github.com/lucas-stellet/switcher) · [foreveryh/claude-code-switch](https://github.com/foreveryh/claude-code-switch) · [aattaran/deepclaude](https://github.com/aattaran/deepclaude)
