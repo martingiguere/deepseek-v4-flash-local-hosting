@@ -22,14 +22,38 @@ DeepSeek-V4-Flash is a **284B-total / 13B-active MoE** model (released open-sour
 
 The 13B *active* parameters give you fast tokens/sec, but you still pay for **all 284B in VRAM** because every expert must be resident. This is the single most important planning fact.
 
+### Why the VRAM math only works because of FP4
+
+The naive parameter math genuinely doesn't fit dual H200 — and that's the entire point of the FP4 design:
+
+| Precision | Bytes/param | 284B total | Fits 2×H200 (282 GB)? |
+|---|---|---|---|
+| BF16/FP16 | 2 | **568 GB** | No — needs ~6–8 GPUs |
+| FP8 (uniform) | 1 | **284 GB** | **No — overshoots by ~2 GB** |
+| FP4 (uniform) | 0.5 | 142 GB | Yes |
+| **FP4+FP8 native mix** | ~0.55 | **~158 GB** | **Yes (~56% of 282 GB)** |
+
+The official instruct checkpoint is **not uniform precision**. Solving for the mix that yields ~158 GB (FP4 = 0.5 B/param, FP8 = 1 B/param, total 284B → ~32B at FP8):
+
+- **~252B params (sparse MoE experts) in FP4** → ~126 GB
+- **~32B params (attention, shared experts, router, embeddings, norms) in FP8** → ~32 GB
+- **= ~158 GB** weights ("as large as a 158B model"); + ~10 GB KV (compressed CSA+HCA attention) + overhead → **~170–175 GB total**
+
+*(The 252/32 split is derived from the 158 GB figure, not an official per-tensor spec — approximate.)* There's even a public HF thread, [*"Is 158B or 284b params?"*](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/discussions/17), about exactly this confusion.
+
 ---
 
 ## 2. Hardware tiers
 
-**Comfortable (recommended, full quality):**
-- **2× H200** (282 GB) — the configuration LMSYS used for Day-0 testing (TP=4 across the pair's GPUs)
+**Minimum that fits (full quality):**
+- **2× H200** (282 GB, TP=2) — 158 GB weights / 2 = ~79 GB/GPU, leaving ~62 GB/GPU for KV + activations. Valid and listed as the minimum by self-host guides.
 - **2× RTX Pro 6000 Blackwell** (192 GB)
 - **4× A100 80 GB** (320 GB) — vLLM prefers this because tensor parallelism wants power-of-two GPU counts
+
+**Throughput config (what LMSYS Day-0 actually used):**
+- **4× H200 (TP=4)** — *not* because 2 can't hold the weights, but for more aggregate memory bandwidth (faster MoE decode) and far more KV headroom (~100 GB/GPU free → bigger batches / more concurrent 1M-context sessions). The Day-0 post was a throughput benchmark, not a min-footprint demo.
+
+> ⚠️ **Hopper FP4 caveat:** H200 has *no native FP4 tensor cores* (that's Blackwell — B200/GB200). On Hopper, SGLang runs the FP4 weights via **w4a16** kernels (`--moe-runner-backend marlin` or `flashinfer_mxfp4`): weights stay FP4 in memory (you keep the memory savings) but compute upcasts to 16-bit (no FP4 compute throughput). FP4-on-Hopper also supports **only tensor parallelism** (no expert parallelism). Blackwell is the preferred target.
 
 **Budget (quality tradeoff):**
 - Community **INT4** quants (GGUF/AWQ/GPTQ) shrink it to **~80 GB** → fits on a single H100/H200 or 2× 48 GB cards, but with *measurable degradation on math, reasoning, and agentic tasks* — which is exactly what you'd use Claude Code for, so be cautious.
@@ -90,7 +114,21 @@ vllm serve ./deepseek-v4-flash \
 
 ### SGLang alternative (≥ 0.4.4)
 
-SGLang shipped a Day-0 recipe and benchmarks ~29% faster than vLLM on H100 for general workloads. It supports DP/TP/SP/EP/PP/CP plus EAGLE/MTP speculative decoding. The exact flag set lives in the [SGLang Cookbook → DeepSeek-V4](https://docs.sglang.io/cookbook/autoregressive/DeepSeek/DeepSeek-V4) entry; the shape is `python -m sglang.launch_server --model-path ./deepseek-v4-flash --tp 4 --tool-call-parser ...` with FP4 MoE and MTP enabled.
+SGLang shipped a Day-0 recipe and benchmarks ~29% faster than vLLM on H100 for general workloads. It supports DP/TP/SP/EP/PP/CP plus EAGLE/MTP speculative decoding. The exact flag set lives in the [SGLang Cookbook → DeepSeek-V4](https://docs.sglang.io/cookbook/autoregressive/DeepSeek/DeepSeek-V4) entry.
+
+On Hopper (H200) the FP4 checkpoint runs through w4a16 MoE kernels — pick `marlin` or `flashinfer_mxfp4` via `--moe-runner-backend`:
+
+```bash
+# Dual H200, minimum-footprint that fits (TP=2)
+python -m sglang.launch_server --model-path ./deepseek-v4-flash \
+  --tp 2 --moe-runner-backend flashinfer_mxfp4 --context-length 131072
+
+# LMSYS-style Day-0 throughput config (4× H200, TP=4, full 1M context)
+python -m sglang.launch_server --model-path ./deepseek-v4-flash \
+  --tp 4 --moe-runner-backend flashinfer_mxfp4 --context-length 1000000
+```
+
+See §2 for why 2×H200 holds the 158 GB of weights and why the Day-0 recipe nonetheless used TP=4.
 
 Both engines expose an **OpenAI-compatible** server at `http://localhost:8000/v1`.
 
@@ -434,6 +472,7 @@ The source-level findings in §10–§12 were verified against these exact commi
 
 - [DeepSeek-V4-Flash on Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
 - [DeepSeek-V4-Flash specs & VRAM (APXML)](https://apxml.com/models/deepseek-v4-flash)
+- [HF discussion: "Is 158B or 284b params?"](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/discussions/17) — the FP4+FP8 weight-size confusion
 - [Self-Hosting DeepSeek V4: vLLM, Hardware & Deployment (Lushbinary)](https://lushbinary.com/blog/deepseek-v4-self-hosting-guide-vllm-hardware-deployment/)
 - [Run DeepSeek V4 Flash Locally — 2026 setup (Codersera)](https://codersera.com/blog/run-deepseek-v4-flash-locally-full-2026-setup-guide/)
 - [DeepSeek-V4 on Day 0 with SGLang (LMSYS)](https://www.lmsys.org/blog/2026-04-25-deepseek-v4/) · [SGLang Cookbook: DeepSeek-V4](https://docs.sglang.io/cookbook/autoregressive/DeepSeek/DeepSeek-V4)
