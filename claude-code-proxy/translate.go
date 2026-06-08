@@ -82,9 +82,14 @@ type OpenAIFunction struct {
 }
 
 type OpenAITool struct {
-	Type       string          `json:"type"`
-	Function   OpenAIFunction  `json:"function,omitempty"`
-	Parameters json.RawMessage `json:"parameters,omitempty"`
+	Type     string          `json:"type"`
+	Function OpenAIToolFunc  `json:"function"`
+}
+
+type OpenAIToolFunc struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 // ---- OpenAI response types ----
@@ -200,7 +205,7 @@ func buildSystemMessages(system json.RawMessage) ([]OpenAIMessage, error) {
 	}
 	var blocks []AnthropicBlock
 	if err := json.Unmarshal(system, &blocks); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("failed to parse system: %w", err)
 	}
 	var parts []string
 	for _, b := range blocks {
@@ -336,10 +341,11 @@ func translateTools(tools []AnthropicTool) []OpenAITool {
 	for i, t := range tools {
 		oaiTools[i] = OpenAITool{
 			Type: "function",
-			Function: OpenAIFunction{
-				Name: t.Name,
+			Function: OpenAIToolFunc{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  t.InputSchema,
 			},
-			Parameters: t.InputSchema,
 		}
 	}
 	return oaiTools
@@ -368,8 +374,9 @@ func translateToolChoice(tc json.RawMessage) interface{} {
 				}
 			}
 		}
+		return obj
 	}
-	return tc
+	return nil
 }
 
 func MapModel(claudeModel string) string {
