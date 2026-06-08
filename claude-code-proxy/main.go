@@ -31,9 +31,11 @@ func main() {
 	slog.SetDefault(logger)
 
 	var backend *Backend
+	backendName := "ollama"
 	switch os.Getenv("CCP_BACKEND") {
 	case "bifrost":
 		backend = NewBifrostBackend()
+		backendName = "bifrost"
 		slog.Info("starting ccp", "backend", "bifrost", "url", backend.BaseURL)
 	default:
 		backend = NewOllamaBackend()
@@ -60,7 +62,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"status":  "ok",
-			"backend": os.Getenv("CCP_BACKEND"),
+			"backend": backendName,
 		})
 	})
 
