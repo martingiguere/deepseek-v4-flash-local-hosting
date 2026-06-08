@@ -437,13 +437,81 @@ class TestCCP(unittest.TestCase):
         }
         _, _ = self._post('/v1/messages', body, headers=hdrs)
 
-        if self._mock_has_requests():
-            mock_req = self._last_mock_request()
-            mock_headers = mock_req['headers']
-            self.assertNotIn('x-anthropic-billing-header', mock_headers)
+        self.assertTrue(self._mock_has_requests(), "mock was never contacted")
+        mock_req = self._last_mock_request()
+        mock_headers = mock_req['headers']
+        self.assertNotIn('x-anthropic-billing-header', mock_headers)
+
+    def test_tool_choice_auto(self):
+        body = {
+            "model": "claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": "auto",
+            "tools": [{"name": "t", "input_schema": {"type": "object"}}],
+        }
+        _, _ = self._post('/v1/messages', body)
+        self.assertTrue(self._mock_has_requests(), "mock was never contacted")
+        log = self._last_mock_request()
+        self.assertEqual(log['body']['tool_choice'], 'auto')
+
+    def test_tool_choice_none(self):
+        body = {
+            "model": "claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tool_choice": "none",
+            "tools": [{"name": "t", "input_schema": {"type": "object"}}],
+        }
+        _, _ = self._post('/v1/messages', body)
+        self.assertTrue(self._mock_has_requests(), "mock was never contacted")
+        log = self._last_mock_request()
+        self.assertEqual(log['body']['tool_choice'], 'none')
+
+    def test_stop_sequences(self):
+        body = {
+            "model": "claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop_sequences": ["\n", "done"],
+        }
+        status, resp = self._post('/v1/messages', body)
+        self.assertEqual(status, 200)
+        self.assertTrue(self._mock_has_requests(), "mock was never contacted")
+        log = self._last_mock_request()
+        self.assertEqual(log['body']['stop'], ["\n", "done"])
+
+    def test_non_streaming_then_stream(self):
+        """Following a non-streaming request with a streaming one (conversation continuity passthrough)."""
+        body = {
+            "model": "claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "First message"}],
+        }
+        status, resp = self._post('/v1/messages', body)
+        self.assertEqual(status, 200)
+        self.assertTrue(self._mock_has_requests(), "mock was never contacted on first turn")
+
+        body2 = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 100,
+            "stream": True,
+            "messages": [
+                {"role": "user", "content": "First message"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "tu_2",
+                                                    "name": "bash", "input": {"cmd": "ls"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_2",
+                                              "content": "file1"}]},
+            ],
+        }
+        status, raw = self._post_stream('/v1/messages', body2)
+        self.assertEqual(status, 200)
+        events = []
+        for line in raw.split('\n'):
+            if line.startswith('data: '):
+                events.append(json.loads(line[6:]))
+        self.assertGreater(len(events), 0)
 
 
 if __name__ == '__main__':
+    import urllib.error
+
     backend = os.environ.get('CCP_BACKEND', 'ollama')
     MockHandler.MODE = backend
 
@@ -460,15 +528,25 @@ if __name__ == '__main__':
                     'CCP_BIFROST_BASE_URL': 'http://localhost:9999'})
 
     proxy = subprocess.Popen(['./ccp'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    time.sleep(0.5)
 
-    # Check if proxy is alive
-    if proxy.poll() is not None:
-        stderr_output = proxy.stderr.read().decode()
-        raise RuntimeError(f"Proxy exited immediately with code {proxy.returncode}. Stderr: {stderr_output}")
+    # Retry /health up to 10 times with 0.2s delay
+    for attempt in range(10):
+        if proxy.poll() is not None:
+            stderr_output = proxy.stderr.read().decode()
+            raise RuntimeError(f"Proxy exited (code {proxy.returncode}) before health check. Stderr: {stderr_output}")
+        try:
+            req = Request('http://localhost:8080/health')
+            resp = urlopen(req)
+            if resp.status == 200:
+                break
+        except URLError:
+            time.sleep(0.2)
+    else:
+        raise RuntimeError("Proxy did not become healthy within 2 seconds")
 
     try:
         unittest.main(argv=[''], exit=False)
     finally:
         proxy.terminate()
+        proxy.wait(timeout=5)
         mock.shutdown()
