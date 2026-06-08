@@ -79,6 +79,7 @@ type OpenAIMessage struct {
 
 type OpenAIToolCall struct {
 	ID       string         `json:"id"`
+	Index    int            `json:"index,omitempty"`
 	Type     string         `json:"type"`
 	Function OpenAIFunction `json:"function"`
 }
@@ -483,6 +484,8 @@ func mapFinishReason(reason string) string {
 		return "tool_use"
 	case "length":
 		return "max_tokens"
+	case "content_filter":
+		return "end_turn"
 	default:
 		return "end_turn"
 	}
@@ -605,8 +608,8 @@ func StreamTranslate(w http.ResponseWriter, body io.Reader, modelName, reqID str
 		}
 
 		if len(delta.ToolCalls) > 0 {
-			if currentPhase == phaseIdle || currentPhase == phaseReasoning {
-				if currentPhase == phaseReasoning {
+			if currentPhase == phaseIdle || currentPhase == phaseReasoning || currentPhase == phaseText {
+				if currentPhase == phaseReasoning || currentPhase == phaseText {
 					emitSSE(w, "content_block_stop", map[string]interface{}{
 						"type":  "content_block_stop",
 						"index": contentBlockIndex - 1,
@@ -629,7 +632,7 @@ func StreamTranslate(w http.ResponseWriter, body io.Reader, modelName, reqID str
 					contentBlockIndex++
 
 					args := tc.Function.Arguments
-					chunkSize := 8
+					chunkSize := 64
 					for i := 0; i < len(args); i += chunkSize {
 						end := i + chunkSize
 						if end > len(args) {
