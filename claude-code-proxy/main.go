@@ -206,6 +206,9 @@ if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
 			StreamTranslate(w, backendResp.Body, modelName, reqID)
+			slog.Info("request", "id", reqID, "model", ar.Model, "backend_model", modelName,
+				"stream", true, "duration_ms", time.Since(start).Milliseconds())
+			return
 		} else {
 			respBody, err := io.ReadAll(backendResp.Body)
 			if err != nil {

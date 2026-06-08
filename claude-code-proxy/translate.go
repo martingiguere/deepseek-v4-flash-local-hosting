@@ -649,13 +649,14 @@ func StreamTranslate(w http.ResponseWriter, body io.Reader, modelName, reqID str
 						})
 					}
 
-					emitSSE(w, "content_block_stop", map[string]interface{}{
-						"type":  "content_block_stop",
-						"index": contentBlockIndex - 1,
-					})
+emitSSE(w, "content_block_stop", map[string]interface{}{
+							"type":  "content_block_stop",
+							"index": contentBlockIndex - 1,
+						})
+					}
 				}
+				currentPhase = phaseIdle
 			}
-		}
 
 		if finishReason != nil && *finishReason != "" {
 			if currentPhase == phaseReasoning || currentPhase == phaseText {
