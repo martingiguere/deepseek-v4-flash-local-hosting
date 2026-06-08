@@ -159,7 +159,7 @@ class TestCCP(unittest.TestCase):
         data = json.dumps(body).encode()
         req = Request(self.BASE + path, data=data, headers=hdrs, method='POST')
         try:
-            resp = urlopen(req)
+            resp = urlopen(req, timeout=10)
             return resp.status, json.loads(resp.read().decode())
         except HTTPError as e:
             body_bytes = e.read()
@@ -170,7 +170,7 @@ class TestCCP(unittest.TestCase):
 
     def _get(self, path):
         req = Request(self.BASE + path, method='GET')
-        resp = urlopen(req)
+        resp = urlopen(req, timeout=10)
         return resp.status, json.loads(resp.read().decode())
 
     def _post_stream(self, path, body):
@@ -181,7 +181,7 @@ class TestCCP(unittest.TestCase):
         }
         data = json.dumps(body).encode()
         req = Request(self.BASE + path, data=data, headers=hdrs, method='POST')
-        resp = urlopen(req)
+        resp = urlopen(req, timeout=30)
         return resp.status, resp.read().decode()
 
     def _last_mock_request(self):
@@ -527,16 +527,15 @@ if __name__ == '__main__':
         env.update({'CCP_BACKEND': 'bifrost', 'CCP_BIFROST_API_KEY': 'test',
                     'CCP_BIFROST_BASE_URL': 'http://localhost:9999'})
 
-    proxy = subprocess.Popen(['./ccp'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    proxy = subprocess.Popen(['./ccp'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Retry /health up to 10 times with 0.2s delay
     for attempt in range(10):
         if proxy.poll() is not None:
-            stderr_output = proxy.stderr.read().decode()
-            raise RuntimeError(f"Proxy exited (code {proxy.returncode}) before health check. Stderr: {stderr_output}")
+            raise RuntimeError(f"Proxy exited (code {proxy.returncode}) during startup")
         try:
             req = Request('http://localhost:8080/health')
-            resp = urlopen(req)
+            resp = urlopen(req, timeout=2)
             if resp.status == 200:
                 break
         except URLError:

@@ -90,8 +90,8 @@ type OpenAIFunction struct {
 }
 
 type OpenAITool struct {
-	Type     string          `json:"type"`
-	Function OpenAIToolFunc  `json:"function"`
+	Type     string         `json:"type"`
+	Function OpenAIToolFunc `json:"function"`
 }
 
 type OpenAIToolFunc struct {
@@ -325,6 +325,7 @@ func extractContentString(content json.RawMessage) string {
 		}
 		return strings.Join(parts, "\n")
 	}
+	slog.Warn("extractContentString: unrecognized content format", "content", string(content))
 	return ""
 }
 
@@ -340,9 +341,13 @@ func mergeAdjacentMessages(sysMsgs, flatMsgs []OpenAIMessage) []OpenAIMessage {
 		prev := &merged[len(merged)-1]
 		curr := all[i]
 		if prev.Role == curr.Role && prev.Role == "user" && prev.ToolCallID == "" && curr.ToolCallID == "" {
-			prevContent, _ := prev.Content.(string)
-			currContent, _ := curr.Content.(string)
-			prev.Content = prevContent + "\n" + currContent
+			prevContent, ok1 := prev.Content.(string)
+			currContent, ok2 := curr.Content.(string)
+			if ok1 && ok2 {
+				prev.Content = prevContent + "\n" + currContent
+			} else {
+				merged = append(merged, curr)
+			}
 		} else {
 			merged = append(merged, curr)
 		}
@@ -381,23 +386,24 @@ func translateToolChoice(tc json.RawMessage) interface{} {
 	}
 	var obj map[string]interface{}
 	if json.Unmarshal(tc, &obj) == nil {
-		if typ, ok := obj["type"].(string); ok {
-			if typ == "any" {
-				return "required"
-			}
-			if typ == "tool" {
-				if name, ok := obj["name"].(string); ok {
-					return map[string]interface{}{
-						"type": "function",
-						"function": map[string]interface{}{
-							"name": name,
-						},
-					}
+		typ, _ := obj["type"].(string)
+		if typ == "any" {
+			return "required"
+		}
+		if typ == "tool" {
+			if name, ok := obj["name"].(string); ok {
+				return map[string]interface{}{
+					"type": "function",
+					"function": map[string]interface{}{
+						"name": name,
+					},
 				}
 			}
 		}
+		slog.Debug("translateToolChoice: returning raw object", "type", typ)
 		return obj
 	}
+	slog.Debug("translateToolChoice: unparseable tool_choice, returning nil", "raw", string(tc))
 	return nil
 }
 
@@ -516,10 +522,10 @@ func StreamTranslate(w http.ResponseWriter, body io.Reader, modelName, reqID str
 	emitSSE(w, "message_start", map[string]interface{}{
 		"type": "message_start",
 		"message": map[string]interface{}{
-			"id":    "msg_" + genID(),
-			"type":  "message",
-			"role":  "assistant",
-			"model": modelName,
+			"id":      "msg_" + genID(),
+			"type":    "message",
+			"role":    "assistant",
+			"model":   modelName,
 			"content": []interface{}{},
 		},
 	})
@@ -623,9 +629,9 @@ func StreamTranslate(w http.ResponseWriter, body io.Reader, modelName, reqID str
 						"type":  "content_block_start",
 						"index": contentBlockIndex,
 						"content_block": map[string]interface{}{
-							"type": "tool_use",
-							"id":   tc.ID,
-							"name": tc.Function.Name,
+							"type":  "tool_use",
+							"id":    tc.ID,
+							"name":  tc.Function.Name,
 							"input": map[string]interface{}{},
 						},
 					})
@@ -649,14 +655,13 @@ func StreamTranslate(w http.ResponseWriter, body io.Reader, modelName, reqID str
 						})
 					}
 
-emitSSE(w, "content_block_stop", map[string]interface{}{
-							"type":  "content_block_stop",
-							"index": contentBlockIndex - 1,
-						})
-					}
+					emitSSE(w, "content_block_stop", map[string]interface{}{
+						"type":  "content_block_stop",
+						"index": contentBlockIndex - 1,
+					})
 				}
-				currentPhase = phaseIdle
 			}
+		}
 
 		if finishReason != nil && *finishReason != "" {
 			if currentPhase == phaseReasoning || currentPhase == phaseText {
@@ -685,7 +690,7 @@ emitSSE(w, "content_block_stop", map[string]interface{}{
 	}
 
 	if currentPhase != phaseDone {
-		if currentPhase == phaseReasoning || currentPhase == phaseText {
+		if contentBlockIndex > 0 && (currentPhase == phaseReasoning || currentPhase == phaseText) {
 			emitSSE(w, "content_block_stop", map[string]interface{}{
 				"type":  "content_block_stop",
 				"index": contentBlockIndex - 1,

@@ -16,8 +16,12 @@ type Backend struct {
 }
 
 func NewOllamaBackend() *Backend {
+	baseURL := os.Getenv("CCP_OLLAMA_BASE_URL")
+	if baseURL == "" {
+		baseURL = "https://ollama.com/v1"
+	}
 	return &Backend{
-		BaseURL:    "https://ollama.com/v1",
+		BaseURL:    baseURL,
 		AuthHeader: "Authorization",
 		AuthValue:  "Bearer " + os.Getenv("CCP_OLLAMA_API_KEY"),
 		ChatPath:   "/chat/completions",

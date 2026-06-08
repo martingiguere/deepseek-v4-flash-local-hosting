@@ -146,36 +146,36 @@ func main() {
 			return
 		}
 
-if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
-		slog.Debug("backend-request", "id", reqID, "body", string(reqJSON))
-	}
-
-	forwardHeaders := make(http.Header)
-	for k, v := range r.Header {
-		kl := strings.ToLower(k)
-		if kl == "x-anthropic-billing-header" || kl == "anthropic-version" || strings.HasPrefix(kl, "anthropic-beta") {
-			continue
+		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+			slog.Debug("backend-request", "id", reqID, "body", string(reqJSON))
 		}
-		forwardHeaders[k] = v
-	}
-	forwardHeaders.Set(backend.AuthHeader, backend.AuthValue)
-	forwardHeaders.Set("Content-Type", "application/json")
-	if rid := r.Header.Get("x-request-id"); rid != "" {
-		forwardHeaders.Set("x-request-id", rid)
-	} else {
-		forwardHeaders.Set("x-request-id", reqID)
-	}
 
-	backendReq, err := http.NewRequestWithContext(r.Context(), "POST", backend.FullURL(), strings.NewReader(string(reqJSON)))
-	if err != nil {
-		slog.Error("failed to create backend request", "id", reqID, "err", err)
-		status, body := BuildError(502, "failed to create backend request")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		w.Write(body)
-		return
-	}
-	backendReq.Header = forwardHeaders
+		forwardHeaders := make(http.Header)
+		for k, v := range r.Header {
+			kl := strings.ToLower(k)
+			if kl == "x-anthropic-billing-header" || kl == "anthropic-version" || strings.HasPrefix(kl, "anthropic-beta") {
+				continue
+			}
+			forwardHeaders[k] = v
+		}
+		forwardHeaders.Set(backend.AuthHeader, backend.AuthValue)
+		forwardHeaders.Set("Content-Type", "application/json")
+		if rid := r.Header.Get("x-request-id"); rid != "" {
+			forwardHeaders.Set("x-request-id", rid)
+		} else {
+			forwardHeaders.Set("x-request-id", reqID)
+		}
+
+		backendReq, err := http.NewRequestWithContext(r.Context(), "POST", backend.FullURL(), strings.NewReader(string(reqJSON)))
+		if err != nil {
+			slog.Error("failed to create backend request", "id", reqID, "err", err)
+			status, body := BuildError(502, "failed to create backend request")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			w.Write(body)
+			return
+		}
+		backendReq.Header = forwardHeaders
 
 		backendResp, err := backend.Client.Do(backendReq)
 		if err != nil {
