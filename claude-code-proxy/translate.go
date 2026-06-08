@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // ---- Anthropic request types ----
@@ -437,7 +438,10 @@ func TranslateResponse(or *OpenAIResponse, modelName string) *AnthropicResponse 
 
 	for _, tc := range msg.ToolCalls {
 		var inputObj interface{}
-		json.Unmarshal([]byte(tc.Function.Arguments), &inputObj)
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &inputObj); err != nil {
+			slog.Warn("failed to parse tool call arguments", "tool", tc.Function.Name, "err", err)
+			inputObj = map[string]interface{}{}
+		}
 		ar.Content = append(ar.Content, AnthropicRespBlock{
 			Type:  "tool_use",
 			ID:    tc.ID,
@@ -463,7 +467,13 @@ func mapFinishReason(reason string) string {
 	}
 }
 
-func StreamTranslate(w io.Writer, flusher http.Flusher, body io.Reader, modelName, reqID string) {
+func StreamTranslate(w http.ResponseWriter, body io.Reader, modelName, reqID string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		slog.Error("response writer does not support flushing", "id", reqID)
+		return
+	}
+
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -668,15 +678,28 @@ func StreamTranslate(w io.Writer, flusher http.Flusher, body io.Reader, modelNam
 		})
 		flusher.Flush()
 	}
+
+	if err := scanner.Err(); err != nil {
+		slog.Error("stream read error", "id", reqID, "err", err)
+	}
 }
 
 func emitSSE(w io.Writer, event string, data interface{}) {
-	jsonData, _ := json.Marshal(data)
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(jsonData))
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		slog.Error("failed to marshal SSE data", "event", event, "err", err)
+		return
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(jsonData)); err != nil {
+		slog.Error("failed to write SSE", "event", event, "err", err)
+	}
 }
 
 func genID() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		slog.Error("failed to generate random ID", "err", err)
+		return fmt.Sprintf("fallback_%d", time.Now().UnixNano())
+	}
 	return hex.EncodeToString(b)
 }
