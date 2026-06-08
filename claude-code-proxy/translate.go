@@ -1,8 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
 	"strings"
 )
 
@@ -395,4 +401,282 @@ func BuildError(status int, msg string) (int, []byte) {
 		},
 	})
 	return status, body
+}
+
+func TranslateResponse(or *OpenAIResponse, modelName string) *AnthropicResponse {
+	ar := &AnthropicResponse{
+		ID:    "msg_" + genID(),
+		Type:  "message",
+		Role:  "assistant",
+		Model: modelName,
+		Usage: AnthropicUsage{
+			InputTokens:  or.Usage.PromptTokens,
+			OutputTokens: or.Usage.CompletionTokens,
+		},
+	}
+
+	if len(or.Choices) == 0 {
+		return ar
+	}
+
+	msg := or.Choices[0].Message
+
+	if msg.Reasoning != "" {
+		ar.Content = append(ar.Content, AnthropicRespBlock{
+			Type:     "thinking",
+			Thinking: msg.Reasoning,
+		})
+	}
+
+	if textContent, ok := msg.Content.(string); ok && textContent != "" {
+		ar.Content = append(ar.Content, AnthropicRespBlock{
+			Type: "text",
+			Text: textContent,
+		})
+	}
+
+	for _, tc := range msg.ToolCalls {
+		var inputObj interface{}
+		json.Unmarshal([]byte(tc.Function.Arguments), &inputObj)
+		ar.Content = append(ar.Content, AnthropicRespBlock{
+			Type:  "tool_use",
+			ID:    tc.ID,
+			Name:  tc.Function.Name,
+			Input: inputObj,
+		})
+	}
+
+	ar.StopReason = mapFinishReason(or.Choices[0].FinishReason)
+	return ar
+}
+
+func mapFinishReason(reason string) string {
+	switch reason {
+	case "stop":
+		return "end_turn"
+	case "tool_calls":
+		return "tool_use"
+	case "length":
+		return "max_tokens"
+	default:
+		return "end_turn"
+	}
+}
+
+func StreamTranslate(w io.Writer, flusher http.Flusher, body io.Reader, modelName, reqID string) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	type phase int
+	const (
+		phaseIdle phase = iota
+		phaseReasoning
+		phaseText
+		phaseToolCall
+		phaseDone
+	)
+
+	currentPhase := phaseIdle
+	contentBlockIndex := 0
+
+	emitSSE(w, "message_start", map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id":    "msg_" + genID(),
+			"type":  "message",
+			"role":  "assistant",
+			"model": modelName,
+			"content": []interface{}{},
+		},
+	})
+	flusher.Flush()
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var chunk OpenAIStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			slog.Debug("stream parse error", "id", reqID, "err", err)
+			continue
+		}
+
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+
+		delta := chunk.Choices[0].Delta
+		finishReason := chunk.Choices[0].FinishReason
+
+		if delta.Reasoning != "" {
+			if currentPhase == phaseIdle {
+				emitSSE(w, "content_block_start", map[string]interface{}{
+					"type":  "content_block_start",
+					"index": contentBlockIndex,
+					"content_block": map[string]interface{}{
+						"type":      "thinking",
+						"thinking":  "",
+						"signature": "",
+					},
+				})
+				contentBlockIndex++
+				currentPhase = phaseReasoning
+			}
+			if currentPhase == phaseReasoning {
+				emitSSE(w, "content_block_delta", map[string]interface{}{
+					"type":  "content_block_delta",
+					"index": contentBlockIndex - 1,
+					"delta": map[string]string{
+						"type":     "thinking_delta",
+						"thinking": delta.Reasoning,
+					},
+				})
+			}
+		}
+
+		if delta.Content != "" {
+			if currentPhase == phaseIdle || currentPhase == phaseReasoning {
+				if currentPhase == phaseReasoning {
+					emitSSE(w, "content_block_stop", map[string]interface{}{
+						"type":  "content_block_stop",
+						"index": contentBlockIndex - 1,
+					})
+				}
+				emitSSE(w, "content_block_start", map[string]interface{}{
+					"type":  "content_block_start",
+					"index": contentBlockIndex,
+					"content_block": map[string]interface{}{
+						"type": "text",
+						"text": "",
+					},
+				})
+				contentBlockIndex++
+				currentPhase = phaseText
+			}
+			if currentPhase == phaseText {
+				emitSSE(w, "content_block_delta", map[string]interface{}{
+					"type":  "content_block_delta",
+					"index": contentBlockIndex - 1,
+					"delta": map[string]string{
+						"type": "text_delta",
+						"text": delta.Content,
+					},
+				})
+			}
+		}
+
+		if len(delta.ToolCalls) > 0 {
+			if currentPhase == phaseIdle || currentPhase == phaseReasoning {
+				if currentPhase == phaseReasoning {
+					emitSSE(w, "content_block_stop", map[string]interface{}{
+						"type":  "content_block_stop",
+						"index": contentBlockIndex - 1,
+					})
+				}
+				currentPhase = phaseToolCall
+			}
+			if currentPhase == phaseToolCall {
+				for _, tc := range delta.ToolCalls {
+					emitSSE(w, "content_block_start", map[string]interface{}{
+						"type":  "content_block_start",
+						"index": contentBlockIndex,
+						"content_block": map[string]interface{}{
+							"type": "tool_use",
+							"id":   tc.ID,
+							"name": tc.Function.Name,
+							"input": map[string]interface{}{},
+						},
+					})
+					contentBlockIndex++
+
+					args := tc.Function.Arguments
+					chunkSize := 8
+					for i := 0; i < len(args); i += chunkSize {
+						end := i + chunkSize
+						if end > len(args) {
+							end = len(args)
+						}
+						partial := args[i:end]
+						emitSSE(w, "content_block_delta", map[string]interface{}{
+							"type":  "content_block_delta",
+							"index": contentBlockIndex - 1,
+							"delta": map[string]string{
+								"type":         "input_json_delta",
+								"partial_json": partial,
+							},
+						})
+					}
+
+					emitSSE(w, "content_block_stop", map[string]interface{}{
+						"type":  "content_block_stop",
+						"index": contentBlockIndex - 1,
+					})
+				}
+			}
+		}
+
+		if finishReason != nil && *finishReason != "" {
+			if currentPhase == phaseReasoning || currentPhase == phaseText {
+				emitSSE(w, "content_block_stop", map[string]interface{}{
+					"type":  "content_block_stop",
+					"index": contentBlockIndex - 1,
+				})
+			}
+
+			emitSSE(w, "message_delta", map[string]interface{}{
+				"type": "message_delta",
+				"delta": map[string]interface{}{
+					"stop_reason":   mapFinishReason(*finishReason),
+					"stop_sequence": nil,
+				},
+			})
+
+			emitSSE(w, "message_stop", map[string]interface{}{
+				"type": "message_stop",
+			})
+
+			currentPhase = phaseDone
+		}
+
+		flusher.Flush()
+	}
+
+	if currentPhase != phaseDone {
+		if currentPhase == phaseReasoning || currentPhase == phaseText {
+			emitSSE(w, "content_block_stop", map[string]interface{}{
+				"type":  "content_block_stop",
+				"index": contentBlockIndex - 1,
+			})
+		}
+		emitSSE(w, "message_delta", map[string]interface{}{
+			"type": "message_delta",
+			"delta": map[string]interface{}{
+				"stop_reason":   "end_turn",
+				"stop_sequence": nil,
+			},
+		})
+		emitSSE(w, "message_stop", map[string]interface{}{
+			"type": "message_stop",
+		})
+		flusher.Flush()
+	}
+}
+
+func emitSSE(w io.Writer, event string, data interface{}) {
+	jsonData, _ := json.Marshal(data)
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(jsonData))
+}
+
+func genID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
