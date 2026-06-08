@@ -167,6 +167,9 @@ func (e *UnsupportedContentError) Error() string {
 	return "unsupported content block type: " + e.Type
 }
 
+// TranslateRequest converts an Anthropic Messages API request into an
+// OpenAI Chat Completions request, applying model mapping, system message
+// extraction, message flattening, and tool/tool_choice translation.
 func TranslateRequest(ar *AnthropicRequest, modelName string) (*OpenAIRequest, error) {
 	sysMsgs, err := buildSystemMessages(ar.System)
 	if err != nil {
@@ -188,6 +191,10 @@ func TranslateRequest(ar *AnthropicRequest, modelName string) (*OpenAIRequest, e
 		Temperature: ar.Temperature,
 		TopP:        ar.TopP,
 		Stop:        ar.StopSequences,
+	}
+
+	if ar.TopK != nil {
+		slog.Warn("top_k is not supported by OpenAI API and was dropped", "top_k", *ar.TopK)
 	}
 
 	if ar.Metadata != nil && ar.Metadata.UserID != "" {
@@ -279,6 +286,8 @@ func flattenMessages(msgs []AnthropicMessage) ([]OpenAIMessage, error) {
 							Arguments: string(b.Input),
 						},
 					})
+				} else if b.Type != "thinking" {
+					slog.Debug("dropping unknown content block type", "type", b.Type, "role", am.Role)
 				}
 			}
 			msg := OpenAIMessage{Role: "assistant"}
@@ -391,6 +400,8 @@ func translateToolChoice(tc json.RawMessage) interface{} {
 	return nil
 }
 
+// MapModel maps a Claude Code model name to the corresponding backend model.
+// claude-opus-* maps to deepseek-v4-pro; everything else maps to deepseek-v4-flash.
 func MapModel(claudeModel string) string {
 	if strings.HasPrefix(claudeModel, "claude-opus") {
 		return "deepseek-v4-pro"
@@ -398,6 +409,7 @@ func MapModel(claudeModel string) string {
 	return "deepseek-v4-flash"
 }
 
+// BuildError returns an Anthropic-shaped error response with the given status and message.
 func BuildError(status int, msg string) (int, []byte) {
 	body, err := json.Marshal(map[string]interface{}{
 		"type": "error",
