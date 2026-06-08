@@ -66,6 +66,11 @@ func main() {
 		})
 	})
 
+	mux.HandleFunc("/v1/messages/count_tokens", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"input_tokens": 0}`))
+	})
+
 	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case sem <- struct{}{}:
@@ -114,13 +119,6 @@ func main() {
 			return
 		}
 
-		// count_tokens stub
-		if strings.HasSuffix(r.URL.Path, "/count_tokens") {
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"input_tokens":0}`))
-			return
-		}
-
 		modelName := MapModel(ar.Model)
 		oaiReq, err := TranslateRequest(&ar, modelName)
 		if err != nil {
@@ -138,31 +136,46 @@ func main() {
 			return
 		}
 
-		reqJSON, _ := json.Marshal(oaiReq)
-
-		if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
-			slog.Debug("backend-request", "id", reqID, "body", string(reqJSON))
+		reqJSON, err := json.Marshal(oaiReq)
+		if err != nil {
+			slog.Error("failed to marshal backend request", "id", reqID, "err", err)
+			status, body := BuildError(502, "failed to build backend request")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			w.Write(body)
+			return
 		}
 
-		// Build forward headers
-		forwardHeaders := make(http.Header)
-		for k, v := range r.Header {
-			kl := strings.ToLower(k)
-			if kl == "x-anthropic-billing-header" || kl == "anthropic-version" || strings.HasPrefix(kl, "anthropic-beta") {
-				continue
-			}
-			forwardHeaders[k] = v
-		}
-		forwardHeaders.Set(backend.AuthHeader, backend.AuthValue)
-		forwardHeaders.Set("Content-Type", "application/json")
-		if rid := r.Header.Get("x-request-id"); rid != "" {
-			forwardHeaders.Set("x-request-id", rid)
-		} else {
-			forwardHeaders.Set("x-request-id", reqID)
-		}
+if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		slog.Debug("backend-request", "id", reqID, "body", string(reqJSON))
+	}
 
-		backendReq, _ := http.NewRequestWithContext(r.Context(), "POST", backend.FullURL(), strings.NewReader(string(reqJSON)))
-		backendReq.Header = forwardHeaders
+	forwardHeaders := make(http.Header)
+	for k, v := range r.Header {
+		kl := strings.ToLower(k)
+		if kl == "x-anthropic-billing-header" || kl == "anthropic-version" || strings.HasPrefix(kl, "anthropic-beta") {
+			continue
+		}
+		forwardHeaders[k] = v
+	}
+	forwardHeaders.Set(backend.AuthHeader, backend.AuthValue)
+	forwardHeaders.Set("Content-Type", "application/json")
+	if rid := r.Header.Get("x-request-id"); rid != "" {
+		forwardHeaders.Set("x-request-id", rid)
+	} else {
+		forwardHeaders.Set("x-request-id", reqID)
+	}
+
+	backendReq, err := http.NewRequestWithContext(r.Context(), "POST", backend.FullURL(), strings.NewReader(string(reqJSON)))
+	if err != nil {
+		slog.Error("failed to create backend request", "id", reqID, "err", err)
+		status, body := BuildError(502, "failed to create backend request")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		w.Write(body)
+		return
+	}
+	backendReq.Header = forwardHeaders
 
 		backendResp, err := backend.Client.Do(backendReq)
 		if err != nil {
@@ -176,7 +189,10 @@ func main() {
 		defer backendResp.Body.Close()
 
 		if backendResp.StatusCode >= 400 {
-			errBody, _ := io.ReadAll(backendResp.Body)
+			errBody, readErr := io.ReadAll(backendResp.Body)
+			if readErr != nil {
+				errBody = []byte("failed to read error body")
+			}
 			slog.Error("backend error", "id", reqID, "status", backendResp.StatusCode, "body", string(errBody))
 			status, body := BuildError(502, "backend returned "+strconv.Itoa(backendResp.StatusCode))
 			w.Header().Set("Content-Type", "application/json")
@@ -191,7 +207,15 @@ func main() {
 			w.Header().Set("Connection", "keep-alive")
 			StreamTranslate(w, backendResp.Body, modelName, reqID)
 		} else {
-			respBody, _ := io.ReadAll(backendResp.Body)
+			respBody, err := io.ReadAll(backendResp.Body)
+			if err != nil {
+				slog.Error("failed to read backend response", "id", reqID, "err", err)
+				status, body := BuildError(502, "failed to read backend response")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				w.Write(body)
+				return
+			}
 			var oaiResp OpenAIResponse
 			if err := json.Unmarshal(respBody, &oaiResp); err != nil {
 				slog.Error("parse error", "id", reqID, "body", string(respBody))
@@ -210,7 +234,13 @@ func main() {
 			"stream", ar.Stream, "duration_ms", time.Since(start).Milliseconds())
 	})
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux}
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      mux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
 
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -219,7 +249,9 @@ func main() {
 		slog.Info("shutting down", "in_flight", inFlight.Load())
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		srv.Shutdown(ctx)
+		if err := srv.Shutdown(ctx); err != nil {
+			slog.Error("shutdown error", "err", err)
+		}
 	}()
 
 	slog.Info("listening", "port", port)

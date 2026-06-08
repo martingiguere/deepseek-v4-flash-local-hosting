@@ -371,13 +371,18 @@ func translateToolChoice(tc json.RawMessage) interface{} {
 	}
 	var obj map[string]interface{}
 	if json.Unmarshal(tc, &obj) == nil {
-		if typ, ok := obj["type"].(string); ok && typ == "tool" {
-			if name, ok := obj["name"].(string); ok {
-				return map[string]interface{}{
-					"type": "function",
-					"function": map[string]interface{}{
-						"name": name,
-					},
+		if typ, ok := obj["type"].(string); ok {
+			if typ == "any" {
+				return "required"
+			}
+			if typ == "tool" {
+				if name, ok := obj["name"].(string); ok {
+					return map[string]interface{}{
+						"type": "function",
+						"function": map[string]interface{}{
+							"name": name,
+						},
+					}
 				}
 			}
 		}
@@ -394,13 +399,17 @@ func MapModel(claudeModel string) string {
 }
 
 func BuildError(status int, msg string) (int, []byte) {
-	body, _ := json.Marshal(map[string]interface{}{
+	body, err := json.Marshal(map[string]interface{}{
 		"type": "error",
 		"error": map[string]string{
 			"type":    "api_error",
 			"message": msg,
 		},
 	})
+	if err != nil {
+		slog.Error("BuildError marshal failed", "err", err)
+		return status, []byte(`{"type":"error","error":{"type":"api_error","message":"internal error"}}`)
+	}
 	return status, body
 }
 
