@@ -235,11 +235,10 @@ if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 	})
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Addr:        ":" + port,
+		Handler:     mux,
+		ReadTimeout: 30 * time.Second,
+		IdleTimeout: 120 * time.Second,
 	}
 
 	go func() {
@@ -257,6 +256,5 @@ if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 	slog.Info("listening", "port", port)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("server error", "err", err)
-		os.Exit(1)
 	}
 }
